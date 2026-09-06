@@ -41,43 +41,132 @@ $volunteer_id = $volunteer['id'];
 $volunteer_name = $volunteer['name'] ?? 'Volunteer';
 
 /* =====================================================
-   SECURE ACTION INTERCEPTOR (CLAIM / COMPLETE ROUTER)
+   SECURE ACTION INTERCEPTOR
+   CLAIM / COMPLETE
 ===================================================== */
-if (isset($_GET['action']) && isset($_GET['id'])) {
-    $task_id = intval($_GET['id']);
-    
+
+if (isset($_GET['action'], $_GET['id'])) {
+
+    $task_id = (int)$_GET['id'];
+
+    if ($task_id <= 0) {
+        header("Location: volunteer_index.php");
+        exit();
+    }
+
+    /* =================================================
+       CLAIM TASK
+       pending_volunteer -> assigned
+    ================================================= */
     if ($_GET['action'] === 'claim') {
-        $up = $conn->prepare("UPDATE donations SET volunteer_id = ?, status = 'assigned' WHERE id = ? AND status = 'accepted' AND volunteer_id IS NULL");
-        $up->bind_param("ii", $volunteer_id, $task_id);
+
+        $up = $conn->prepare("
+            UPDATE donations
+            SET status = 'assigned'
+            WHERE id = ?
+              AND volunteer_id = ?
+              AND status = 'pending_volunteer'
+              AND expiry IS NOT NULL
+              AND expiry > NOW()
+        ");
+
+        if (!$up) {
+            die("Claim query failed: " . $conn->error);
+        }
+
+        $up->bind_param(
+            "ii",
+            $task_id,
+            $volunteer_id
+        );
+
         $up->execute();
-        $up->close();
-    } elseif ($_GET['action'] === 'complete') {
-        $up = $conn->prepare("UPDATE donations SET status = 'delivered' WHERE id = ? AND volunteer_id = ?");
-        $up->bind_param("ii", $task_id, $volunteer_id);
-        $up->execute();
+
         $up->close();
     }
-    
-    // Smooth deterministic routing loop protection header redirect
+
+    /* =================================================
+       COMPLETE TASK
+       assigned/in_transit -> delivered
+    ================================================= */
+    elseif ($_GET['action'] === 'complete') {
+
+        $up = $conn->prepare("
+            UPDATE donations
+            SET status = 'delivered'
+            WHERE id = ?
+              AND volunteer_id = ?
+              AND status IN ('assigned', 'in_transit')
+        ");
+
+        if (!$up) {
+            die("Complete query failed: " . $conn->error);
+        }
+
+        $up->bind_param(
+            "ii",
+            $task_id,
+            $volunteer_id
+        );
+
+        $up->execute();
+
+        $up->close();
+    }
+
     header("Location: volunteer_index.php");
     exit();
 }
 
 /* =====================================================
-   METRIC COMPILATION MATRIX
+   AVAILABLE TASKS COUNT
+   NGO -> SPECIFIC VOLUNTEER
 ===================================================== */
-$stmt1 = $conn->prepare("SELECT COUNT(*) AS total FROM donations WHERE status = 'accepted' AND volunteer_id IS NULL");
+$stmt1 = $conn->prepare("
+    SELECT COUNT(*) AS total
+    FROM donations
+    WHERE volunteer_id IS NULL
+      AND status = 'pending_volunteer'
+      AND expiry IS NOT NULL
+      AND expiry > NOW()
+");
+
+if (!$stmt1) {
+    die("Available tasks query failed: " . $conn->error);
+}
+
 $stmt1->execute();
-$available_count = $stmt1->get_result()->fetch_assoc()['total'];
+
+$result1 = $stmt1->get_result();
+
+$row1 = $result1->fetch_assoc();
+
+$available_count = (int)($row1['total'] ?? 0);
+
 $stmt1->close();
 
-$stmt2 = $conn->prepare("SELECT COUNT(*) AS total FROM donations WHERE volunteer_id = ? AND status != 'delivered'");
+$stmt2 = $conn->prepare("
+    SELECT COUNT(*) AS total
+    FROM donations
+    WHERE volunteer_id = ?
+      AND status IN ('assigned', 'in_transit')
+");
+
+if (!$stmt2) {
+    die("Active tasks query failed: " . $conn->error);
+}
+
 $stmt2->bind_param("i", $volunteer_id);
 $stmt2->execute();
-$assigned_count = $stmt2->get_result()->fetch_assoc()['total'];
+
+$result2 = $stmt2->get_result();
+$row2 = $result2->fetch_assoc();
+
+$assigned_count = (int)($row2['total'] ?? 0);
+
 $stmt2->close();
 
-$stmt3 = $conn->prepare("SELECT COUNT(*) AS total FROM donations WHERE volunteer_id = ? AND status = 'delivered'");
+$stmt3 = $conn->prepare("SELECT COUNT(*) AS total FROM donations WHERE volunteer_id = ? AND status = 'completed'");
 $stmt3->bind_param("i", $volunteer_id);
 $stmt3->execute();
 $completed_count = $stmt3->get_result()->fetch_assoc()['total'];
@@ -127,15 +216,32 @@ $recentStmt->execute();
 $recentActivities = $recentStmt->get_result();
 $recentStmt->close();
 
-// Get notification count
+/* =====================================================
+   NOTIFICATION COUNT
+===================================================== */
 $notifStmt = $conn->prepare("
-    SELECT COUNT(*) AS total 
-    FROM notifications 
-    WHERE user_id = ? AND is_read = 0
+    SELECT COUNT(*) AS total
+    FROM notifications n
+    INNER JOIN donations d
+        ON d.id = n.donation_id
+    WHERE n.user_id = ?
+      AND n.is_read = 0
+      AND d.expiry IS NOT NULL
+      AND d.expiry > NOW()
 ");
+
+if (!$notifStmt) {
+    die("Notification query failed: " . $conn->error);
+}
+
 $notifStmt->bind_param("i", $volunteer_id);
 $notifStmt->execute();
-$unreadCount = $notifStmt->get_result()->fetch_assoc()['total'] ?? 0;
+
+$notifResult = $notifStmt->get_result();
+$notifRow = $notifResult->fetch_assoc();
+
+$unreadCount = (int)($notifRow['total'] ?? 0);
+
 $notifStmt->close();
 
 $current_page = basename($_SERVER['PHP_SELF']);
@@ -698,27 +804,41 @@ $current_page = basename($_SERVER['PHP_SELF']);
                 <div class="space-y-2 max-h-72 overflow-y-auto pr-2">
                     <?php if ($recentActivities && $recentActivities->num_rows > 0): ?>
                         <?php $displayed = 0; ?>
-                        <?php while($activity = $recentActivities->fetch_assoc() && $displayed < 5): 
+                        <?php while ($activity = $recentActivities->fetch_assoc()): ?>
+
+                            <?php
+                            if ($displayed >= 5) {
+                                break;
+                            }
+
                             $status = strtolower($activity['status'] ?? 'pending');
+
                             $statusIcons = [
                                 'pending' => '⏳',
                                 'accepted' => '📋',
+                                'pending_volunteer' => '📋',
                                 'assigned' => '🚚',
                                 'in_transit' => '🚛',
                                 'delivered' => '✅'
                             ];
+
                             $statusLabels = [
                                 'pending' => 'Available',
                                 'accepted' => 'Accepted',
+                                'pending_volunteer' => 'Waiting for Volunteer',
                                 'assigned' => 'Assigned',
                                 'in_transit' => 'In Transit',
                                 'delivered' => 'Delivered'
                             ];
+
                             $icon = $statusIcons[$status] ?? '📦';
                             $label = $statusLabels[$status] ?? ucfirst($status);
+
                             $displayed++;
-                        ?>
-                            <div class="activity-item <?= $status ?>">
+                            ?>
+
+                            <!-- your existing activity HTML -->
+                             <div class="activity-item <?= $status ?>">
                                 <div class="flex items-center justify-between">
                                     <div class="flex items-center gap-3 min-w-0">
                                         <span class="text-lg flex-shrink-0"><?= $icon ?></span>
@@ -742,6 +862,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
                                     </span>
                                 </div>
                             </div>
+                            
                         <?php endwhile; ?>
                     <?php else: ?>
                         <div class="text-center py-12">

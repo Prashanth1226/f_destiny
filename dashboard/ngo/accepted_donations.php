@@ -100,28 +100,153 @@ $email = $_SESSION['user'];
 
 $ngoId = getNgoId($conn, $email);
 
-/* SEND ACCEPTED → VOLUNTEER POOL */
+/* =========================================================
+   SEND ACCEPTED DONATION → VOLUNTEER POOL
+========================================================= */
+
 if (isset($_GET['send'])) {
 
-    $id = (int) $_GET['send'];
+    $donation_id = (int)$_GET['send'];
 
-    $stmt = $conn->prepare("
-        UPDATE donations
-        SET status='pending_volunteer'
-        WHERE id=? AND ngo_id=? AND status='accepted'
-    ");
-
-    $stmt->bind_param("ii", $id, $ngoId);
-    $stmt->execute();
-
-    if ($stmt->affected_rows > 0) {
-        $stmt->close();
-        header("Location: accepted_donations.php?msg=sent_to_volunteers");
-    } else {
-        $stmt->close();
+    if ($donation_id <= 0) {
         header("Location: accepted_donations.php?msg=send_failed");
+        exit();
     }
-    exit();
+
+    try {
+
+        $conn->begin_transaction();
+
+        /* -----------------------------------------
+           Move donation into volunteer pool
+        ----------------------------------------- */
+
+        $stmt = $conn->prepare("
+            UPDATE donations
+            SET
+                status = 'pending_volunteer',
+                volunteer_id = NULL
+            WHERE id = ?
+              AND ngo_id = ?
+              AND status = 'accepted'
+              AND expiry IS NOT NULL
+              AND expiry > NOW()
+        ");
+
+        if (!$stmt) {
+            throw new Exception(
+                "Send donation query failed: " . $conn->error
+            );
+        }
+
+        $stmt->bind_param(
+            "ii",
+            $donation_id,
+            $ngoId
+        );
+
+        $stmt->execute();
+
+        if ($stmt->affected_rows !== 1) {
+            $stmt->close();
+
+            throw new Exception(
+                "Donation could not be sent to the volunteer pool. It may already be sent or expired."
+            );
+        }
+
+        $stmt->close();
+
+
+        /* -----------------------------------------
+           Get all volunteers
+        ----------------------------------------- */
+
+        $volunteerStmt = $conn->prepare("
+            SELECT id
+            FROM users
+            WHERE role = 'volunteer'
+        ");
+
+        if (!$volunteerStmt) {
+            throw new Exception(
+                "Volunteer query failed: " . $conn->error
+            );
+        }
+
+        $volunteerStmt->execute();
+
+        $volunteers = $volunteerStmt
+            ->get_result();
+
+
+        /* -----------------------------------------
+           Create notification for every volunteer
+        ----------------------------------------- */
+
+        $notificationStmt = $conn->prepare("
+            INSERT INTO notifications
+                (
+                    user_id,
+                    donation_id,
+                    message,
+                    is_read,
+                    created_at
+                )
+            VALUES
+                (?, ?, ?, 0, NOW())
+        ");
+
+        if (!$notificationStmt) {
+            $volunteerStmt->close();
+
+            throw new Exception(
+                "Notification query failed: " . $conn->error
+            );
+        }
+
+        $message =
+            "A new food donation is available for pickup.";
+
+        while ($volunteer = $volunteers->fetch_assoc()) {
+
+            $volunteer_id = (int)$volunteer['id'];
+
+            $notificationStmt->bind_param(
+                "iis",
+                $volunteer_id,
+                $donation_id,
+                $message
+            );
+
+            $notificationStmt->execute();
+        }
+
+        $notificationStmt->close();
+        $volunteerStmt->close();
+
+
+        $conn->commit();
+
+        header(
+            "Location: accepted_donations.php?msg=sent_to_volunteers"
+        );
+
+        exit();
+
+    } catch (Throwable $e) {
+
+        try {
+            $conn->rollback();
+        } catch (Throwable $ignored) {
+        }
+
+        header(
+            "Location: accepted_donations.php?msg=send_failed"
+        );
+
+        exit();
+    }
 }
 
 $accepted = fetchAcceptedDonationRecords($conn, $ngoId);
@@ -309,7 +434,7 @@ if ($accepted) {
         <div class="fade-in p-4 rounded-xl border text-sm font-medium flex items-center gap-2
             <?= $_GET['msg'] === 'sent_to_volunteers' ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-rose-50 border-rose-200 text-rose-700' ?>">
             <span class="text-lg"><?= $_GET['msg'] === 'sent_to_volunteers' ? '✅' : '❌' ?></span>
-            <?= $_GET['msg'] === 'sent_to_volunteers' ? 'Donation sent to volunteer pool successfully!' : 'Failed to send donation to volunteers. Please try again.' ?>
+            <?= $_GET['msg'] === 'sent_to_volunteers' ? 'Donation sent to volunteer  successfully!' : 'Failed to send donation to volunteers. Please try again.' ?>
         </div>
     <?php endif; ?>
 

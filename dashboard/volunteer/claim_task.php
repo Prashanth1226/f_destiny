@@ -1,120 +1,244 @@
 <?php
-/**
- * F-Destiny - Volunteer Task Assignment Processor
- * File: claim_task.php (FINAL FIXED VERSION)
- */
 
 session_start();
+
 require_once '../../middleware/auth.php';
 checkRole('volunteer');
 
-if (!isset($_SESSION['user'])) {
-    header("Location: ../../login.php");
-    exit();
+require_once '../../config/db.php';
+
+header('Content-Type: application/json');
+
+
+/* ================= LOGIN CHECK ================= */
+
+if (!isset($_SESSION['user_id'])) {
+
+    echo json_encode([
+        "success" => false,
+        "message" => "Your session has expired. Please login again."
+    ]);
+
+    exit;
 }
 
-/* ---------------- Database Connection ---------------- */
 
-$conn = new mysqli("localhost", "root", "", "f_destiny");
+$volunteer_id = (int)$_SESSION['user_id'];
 
-if ($conn->connect_error) {
-    die("Database Connection Failed: " . $conn->connect_error);
+
+/* ================= TASK ID ================= */
+
+if (
+    !isset($_GET['id']) ||
+    !is_numeric($_GET['id'])
+) {
+
+    echo json_encode([
+        "success" => false,
+        "message" => "Invalid task."
+    ]);
+
+    exit;
 }
 
-$conn->set_charset("utf8mb4");
 
-/* ---------------- Volunteer Details ---------------- */
+$donation_id = (int)$_GET['id'];
 
-$email = $_SESSION['user'];
 
-$v_stmt = $conn->prepare("
-    SELECT id
-    FROM users
-    WHERE email = ?
-    LIMIT 1
-");
-
-$v_stmt->bind_param("s", $email);
-$v_stmt->execute();
-
-$volunteer = $v_stmt->get_result()->fetch_assoc();
-$v_stmt->close();
-
-if (!$volunteer) {
-    die("Volunteer account not found.");
-}
-
-$volunteer_id = (int)$volunteer['id'];
-
-/* ---------------- Claim Task ---------------- */
-
-if (!isset($_GET['id']) || empty($_GET['id'])) {
-    header("Location: available_tasks.php");
-    exit();
-}
-
-$task_id = (int)$_GET['id'];
+/* ================= TRANSACTION ================= */
 
 $conn->begin_transaction();
 
+
 try {
 
-    /**
-     * 🔥 KEY FIX:
-     * - We FIRST lock the row using SELECT FOR UPDATE
-     * - Prevents 2 volunteers claiming same task at same time
+    /*
+     * Lock donation row.
      */
 
-    $lock_stmt = $conn->prepare("
-        SELECT id, status, volunteer_id
+    $stmt = $conn->prepare("
+        SELECT id, status
         FROM donations
         WHERE id = ?
         FOR UPDATE
     ");
 
-    $lock_stmt->bind_param("i", $task_id);
-    $lock_stmt->execute();
-    $task = $lock_stmt->get_result()->fetch_assoc();
-    $lock_stmt->close();
-
-    if (!$task) {
-        throw new Exception("Task not found");
+    if (!$stmt) {
+        throw new Exception(
+            "Unable to check the task."
+        );
     }
 
-    if ($task['status'] !== 'pending_volunteer' || !empty($task['volunteer_id'])) {
-        throw new Exception("Task already assigned");
+
+    $stmt->bind_param(
+        "i",
+        $donation_id
+    );
+
+    $stmt->execute();
+
+    $result = $stmt->get_result();
+
+    $donation = $result->fetch_assoc();
+
+    $stmt->close();
+
+
+    /* ================= TASK EXISTS ================= */
+
+    if (!$donation) {
+
+        throw new Exception(
+            "This task no longer exists."
+        );
     }
 
-    /**
-     * FINAL ASSIGNMENT STEP
+
+    /*
+     * Your available-task status.
      */
-    $claim_stmt = $conn->prepare("
+
+    if (
+        strtolower($donation['status'])
+        !== 'pending_volunteer'
+    ) {
+
+        throw new Exception(
+            "This task is no longer available."
+        );
+    }
+
+
+    /* ================= EXISTING ASSIGNMENT ================= */
+
+    $check = $conn->prepare("
+        SELECT id
+        FROM assignments
+        WHERE donation_id = ?
+        LIMIT 1
+    ");
+
+    if (!$check) {
+        throw new Exception(
+            "Unable to verify assignment."
+        );
+    }
+
+
+    $check->bind_param(
+        "i",
+        $donation_id
+    );
+
+    $check->execute();
+
+    $assignmentResult =
+        $check->get_result();
+
+
+    if ($assignmentResult->num_rows > 0) {
+
+        $check->close();
+
+        throw new Exception(
+            "Another volunteer has already accepted this task."
+        );
+    }
+
+
+    $check->close();
+
+
+    /* ================= CREATE ASSIGNMENT ================= */
+
+    $assign = $conn->prepare("
+        INSERT INTO assignments
+        (
+            donation_id,
+            volunteer_id,
+            status
+        )
+        VALUES
+        (?, ?, 'Assigned')
+    ");
+
+    if (!$assign) {
+
+        throw new Exception(
+            "Unable to create assignment."
+        );
+    }
+
+
+    $assign->bind_param(
+        "ii",
+        $donation_id,
+        $volunteer_id
+    );
+
+
+    if (!$assign->execute()) {
+
+        throw new Exception(
+            "Unable to assign this task."
+        );
+    }
+
+
+    $assign->close();
+
+
+    /* ================= UPDATE DONATION ================= */
+
+    $update = $conn->prepare("
         UPDATE donations
-        SET volunteer_id = ?,
-            status = 'assigned',
-            volunteer_assigned_at = NOW()
+        SET status = 'Approved'
         WHERE id = ?
     ");
 
-    $claim_stmt->bind_param("ii", $volunteer_id, $task_id);
-    $claim_stmt->execute();
 
-    if ($claim_stmt->affected_rows === 0) {
-        throw new Exception("Failed to assign task");
+    if (!$update) {
+
+        throw new Exception(
+            "Unable to update donation status."
+        );
     }
 
-    $claim_stmt->close();
+
+    $update->bind_param(
+        "i",
+        $donation_id
+    );
+
+    $update->execute();
+
+    $update->close();
+
+
+    /* ================= SUCCESS ================= */
 
     $conn->commit();
 
-    header("Location: active_manifest.php?msg=claimed_success");
-    exit();
+
+    echo json_encode([
+        "success" => true,
+        "message" => "Task accepted successfully.",
+        "donation_id" => $donation_id
+    ]);
+
+    exit;
+
 
 } catch (Exception $e) {
 
     $conn->rollback();
 
-    header("Location: available_tasks.php?error=" . urlencode($e->getMessage()));
-    exit();
+
+    echo json_encode([
+        "success" => false,
+        "message" => $e->getMessage()
+    ]);
+
+    exit;
 }
 ?>

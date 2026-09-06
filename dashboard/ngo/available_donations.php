@@ -123,15 +123,25 @@ if (isset($_GET['accept'])) {
 if (isset($_GET['reject'])) {
     $id = (int) $_GET['reject'];
 
-    $check = $conn->prepare("SELECT status FROM donations WHERE id = ? LIMIT 1");
+    $check = $conn->prepare("
+        SELECT status, expiry
+        FROM donations
+        WHERE id = ?
+        LIMIT 1
+    "); 
     $check->bind_param("i", $id);
     $check->execute();
     $checkResult = $check->get_result();
     $row = $checkResult->fetch_assoc();
     $check->close();
 
-    if (!$row || strtolower($row['status']) !== 'pending') {
-        header("Location: available_donations.php?toast_type=error&toast_title=Already Processed&toast_message=" . urlencode("This donation is no longer pending."));
+    if (!$row || $row['status'] !== 'pending') {
+        header("Location: available_donations.php?error=Already processed");
+        exit();
+    }
+
+    if (empty($row['expiry']) || strtotime($row['expiry']) <= time()) {
+        header("Location: available_donations.php?toast_type=error&toast_title=Donation Expired&toast_message=" . urlencode("This donation has expired and can no longer be accepted."));
         exit();
     }
 
@@ -166,17 +176,19 @@ if (isset($_GET['toast_type'], $_GET['toast_title'], $_GET['toast_message'])) {
 $donationsStmt = $conn->prepare("
 SELECT
     d.*,
-
-    u.name  AS donor_name,
+    u.name AS donor_name,
     u.email AS donor_email,
     u.phone AS donor_phone
 
 FROM donations d
 
 LEFT JOIN users u
-ON u.id = d.donor_id
+    ON u.id = d.donor_id
 
-WHERE d.status='pending'
+WHERE d.status = 'pending'
+  AND d.expiry IS NOT NULL
+  AND d.expiry > NOW()
+  
 
 ORDER BY d.created_at DESC
 ");

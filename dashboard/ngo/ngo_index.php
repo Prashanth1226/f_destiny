@@ -61,10 +61,17 @@ $total_accepted = $accepted_data['total'];
 $pending_query = $conn->query("
     SELECT COUNT(*) AS total
     FROM donations
-    WHERE status = 'pending' OR status IS NULL
+    WHERE (status = 'pending' OR status IS NULL)
+      AND expiry IS NOT NULL
+      AND expiry > NOW()
 ");
-$pending_data = $pending_query->fetch_assoc();
-$pendingCount = $pending_data['total'];
+
+$pendingCount = 0;
+
+if ($pending_query) {
+    $pendingRow = $pending_query->fetch_assoc();
+    $pendingCount = (int)($pendingRow['total'] ?? 0);
+}
 
 /* =========================
    5. IN TRANSIT DONATIONS
@@ -119,19 +126,30 @@ $rejected_data = $rejected_query->get_result()->fetch_assoc();
 $totalRejected = $rejected_data['total'];
 
 /* =========================
-   9. UNREAD NOTIFICATIONS
+   9. UNREAD ACTIVE NOTIFICATIONS
+   Only count notifications for donations
+   that have NOT expired.
 ========================= */
+
 $stmt = $conn->prepare("
     SELECT COUNT(*) AS total
-    FROM notifications
-    WHERE user_id = ?
-    AND is_read = 0
+    FROM notifications n
+    INNER JOIN donations d
+        ON d.id = n.donation_id
+    WHERE n.user_id = ?
+      AND n.is_read = 0
+      AND d.expiry IS NOT NULL
+      AND d.expiry > NOW()
 ");
+
 $stmt->bind_param("i", $ngo_id);
 $stmt->execute();
+
 $result = $stmt->get_result();
 $row = $result->fetch_assoc();
-$unreadCount = $row['total'];
+
+$unreadCount = (int)($row['total'] ?? 0);
+
 $stmt->close();
 
 /* =========================
