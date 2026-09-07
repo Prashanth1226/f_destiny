@@ -7,7 +7,7 @@ ini_set('display_errors', 1);
 $conn = new mysqli(
     "sql111.infinityfree.com",
     "if0_42579651",
-    "YOUR_DATABASE_PASSWORD",
+    "Tj4CRunCECvcS",
     "if0_42579651_fdestinydb"
 );
 if ($conn->connect_error) {
