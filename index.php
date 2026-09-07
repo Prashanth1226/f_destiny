@@ -4,8 +4,12 @@ session_start();
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
-$conn = new mysqli("localhost", "root", "", "f_destiny");
-
+$conn = new mysqli(
+    "sql111.infinityfree.com",
+    "if0_42579651",
+    "YOUR_DATABASE_PASSWORD",
+    "if0_42579651_fdestinydb"
+);
 if ($conn->connect_error) {
     die("Connection failed: " . $conn->connect_error);
 }
